@@ -3,12 +3,18 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 #include <atomic>
+#include <vector>
+#include <string>
+#include <algorithm>
+#define NOMINMAX
 #include "windows.h"
 #include "MvCameraControl.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "kernel32.lib")
+
+
 
 bool g_bExit = false;
 unsigned int g_nPayloadSize = 0;
@@ -20,6 +26,114 @@ std::string g_outputPath = "D:/XR Lab/ExtendedReality/videos/";
 
 std::atomic <bool> g_bToggleRecording(false);
 
+std::atomic <bool> g_bToggleDisplay(false);
+bool g_bDisplay = true;
+
+std::atomic <bool> g_bTogglePlay(false);
+bool g_bPlay = false;
+std::atomic <int> g_iSelectedVideo(-1);
+std::vector<std::string> g_videoFiles;
+std::atomic <bool> g_bVideoSelectionMode(false);
+std::string g_videoSelectionBuffer;
+
+
+
+bool hasVideoExtension(const std::string& filename)
+{
+    size_t pos = filename.find_last_of(".");
+    if (pos == std::string::npos) {
+        return false;
+    }
+
+    std::string ext = filename.substr(filename.find_last_of(".") + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return (ext == "mp4" || ext == "avi" || ext == "mov");
+}
+
+
+void LoadVideoFiles() {
+    g_videoFiles.clear();
+
+    WIN32_FIND_DATAA findData;
+    std::string searchPath = g_outputPath + "*.mp4";
+
+    HANDLE hFind = FindFirstFileA(searchPath.c_str(), &findData);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            std::string filename = findData.cFileName;
+            if (hasVideoExtension(filename)) {
+                g_videoFiles.push_back(g_outputPath + filename);
+            }
+        } while (FindNextFileA(hFind, &findData));
+        FindClose(hFind);
+    }
+    std::sort(g_videoFiles.begin(), g_videoFiles.end());
+}
+
+
+void DisplayVideoFiles() {
+    printf("\n===== Recorded Video Files =====\n");
+    if (g_videoFiles.empty()) {
+        printf("No video files found in %s\n", g_outputPath.c_str());
+    }
+    else {
+        for (size_t i = 0; i < g_videoFiles.size(); i++) {
+            std::string filename = g_videoFiles[i].substr(g_videoFiles[i].find_last_of("/\\") + 1);
+            printf("%d: %s\n", (int)i + 1, filename.c_str());
+        }
+        printf("Press 1-%d to play, or 'p' to return to camera mode\n", std::min(9, (int)g_videoFiles.size()));
+    }
+    printf("===============================\n");
+}
+
+
+void TogglePlayMode() {
+    g_bPlay = !g_bPlay;
+
+    if (g_bPlay) {
+        LoadVideoFiles();
+        printf("Entering playback mode\n");
+        DisplayVideoFiles();
+
+        // select video
+        printf("Enter video number and press Enter: ");
+        g_bVideoSelectionMode = true;
+        g_videoSelectionBuffer.clear();
+    }
+    else {
+        printf("Exiting playback mode\n");
+        g_iSelectedVideo = -1;
+        g_bVideoSelectionMode = false;
+        g_videoSelectionBuffer.clear();
+    }
+}
+
+
+void ProcessVideoSelection() {
+    if (g_videoSelectionBuffer.empty()) {
+        return;
+    }
+
+    try {
+        int videoIndex = std::stoi(g_videoSelectionBuffer) - 1;
+        if (videoIndex >= 0 && videoIndex < g_videoFiles.size()) {
+            g_iSelectedVideo = videoIndex;
+            printf("Selected video #%d\n", videoIndex + 1);
+        }
+        else {
+            printf("Invalid video number: %s (valid range: 1-%d)\n",
+                g_videoSelectionBuffer.c_str(), (int)g_videoFiles.size());
+        }
+    }
+    catch (std::exception& e) {
+        printf("Invalid input: %s\n", g_videoSelectionBuffer.c_str());
+    }
+
+    g_bVideoSelectionMode = false;
+    g_videoSelectionBuffer.clear();
+}
+
+
 unsigned int _stdcall TerminalInputThread(void* pParam)
 {
     char ch;
@@ -28,19 +142,52 @@ unsigned int _stdcall TerminalInputThread(void* pParam)
         if (_kbhit())
         {
             ch = _getch();
-            if (ch == 's' || ch == 'S')
-            {
-                g_bToggleRecording = true;
+
+            if (g_bVideoSelectionMode) {
+                if (ch == '\r' || ch == '\n') {  // Enter
+                    ProcessVideoSelection();
+                }
+                else if (ch == 27) {  // ESC
+                    printf("Video selection cancelled\n");
+                    g_bVideoSelectionMode = false;
+                    g_videoSelectionBuffer.clear();
+                }
+                else if (ch == '\b') {  // Backspace
+                    if (!g_videoSelectionBuffer.empty()) {
+                        g_videoSelectionBuffer.pop_back();
+                        printf("\b \b");
+                    }
+                }
+                else if (ch >= '0' && ch <= '9') {  // Number
+                    g_videoSelectionBuffer.push_back(ch);
+                    printf("%c", ch);
+                }
             }
-            else if (ch == 'q' || ch == 'Q')
+            else 
             {
-                g_bExit = true;
+                if (ch == 's' || ch == 'S')
+                {
+                    g_bToggleRecording = true;
+                }
+                else if (ch == 'd' || ch == 'D')
+                {
+                    g_bToggleDisplay = true;
+                }
+                else if (ch == 'p' || ch == 'P')
+                {
+                    g_bTogglePlay = true;
+                }
+                else if (ch == 'q' || ch == 'Q')
+                {
+                    g_bExit = true;
+                }
             }
         }
         Sleep(100);
     }
     return 0;
 }
+
 
 void WaitForKeyPress(void)
 {
@@ -50,6 +197,7 @@ void WaitForKeyPress(void)
     }
     _getch();
 }
+
 
 std::string GetCurrentTimeString()
 {
@@ -145,6 +293,7 @@ void StartRecording(int width, int height)
     }
 }
 
+
 void StopRecording()
 {
     if (g_bRecording)
@@ -153,6 +302,119 @@ void StopRecording()
         g_bRecording = false;
         printf("Recording stopped.\n");
     }
+}
+
+
+void PlayVideo(const std::string& videoPath)
+{
+    cv::VideoCapture cap(videoPath);
+    if (!cap.isOpened()) {
+        printf("Error: Could not open video: %s\n", videoPath.c_str());
+        return;
+    }
+
+    std::string filename = videoPath.substr(videoPath.find_last_of("/\\") + 1);
+    printf("Playing: %s\n", filename.c_str());
+
+    double fps = cap.get(cv::CAP_PROP_FPS);
+    int delay = 1000 / fps;
+    double totalFrames = cap.get(cv::CAP_PROP_FRAME_COUNT);
+
+    cv::namedWindow("Video Playback", cv::WINDOW_NORMAL);
+    cv::resizeWindow("Video Playback", 1280, 720);
+
+    cv::Mat frame;
+    bool isPaused = false;
+    int currentFrame = 0;
+
+    bool readSuccess = cap.read(frame);
+    if (!readSuccess) {
+        printf("Error: Could not read the first frame.\n");
+        return;
+    }
+
+    currentFrame = 1;
+
+    while (cap.read(frame) && !g_bExit && g_bPlay) {
+        cv::putText(frame, "PLAYBACK", cv::Point(20, 250), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
+
+        cv::putText(frame, filename, cv::Point(20, frame.rows - 20), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 255, 255), 2);
+
+        char frameInfo[100];
+        sprintf_s(frameInfo, "Frame: %d / %d", currentFrame, (int)totalFrames);
+        cv::putText(frame, frameInfo, cv::Point(20, 350), cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(255, 255, 255), 2);
+
+        if (isPaused) {
+            cv::putText(frame, "PAUSED", cv::Point(20, 300), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
+        }
+
+        cv::imshow("Video Playback", frame);
+
+        int key = isPaused ? cv::waitKey(0) : cv::waitKey(delay);
+
+        if (key == 27 || key == 'p' || key == 'P') {
+            break;
+        }
+        
+        else if (key == 32) { // Spacebar
+            isPaused = !isPaused;
+            if (isPaused) {
+                printf("Video paused. Press SPACE to resume, '.' for next frame, ',' for previous frame.\n");
+                cap.set(cv::CAP_PROP_POS_FRAMES, cap.get(cv::CAP_PROP_POS_FRAMES) - 1);
+            }
+            else {
+                printf("Video resumed.\n");
+            }
+        }
+        
+        else if (isPaused && key == '.') { // Next frame
+            if (currentFrame < totalFrames) {
+                cap.set(cv::CAP_PROP_POS_FRAMES, currentFrame);
+                readSuccess = cap.read(frame);
+                if (readSuccess) {
+                    currentFrame++;
+                }
+                else {
+                    printf("Cannot read next frame\n");
+                }
+            }
+            else {
+                printf("The last frame\n");
+            }
+        }
+
+        else if (isPaused && key == ',') {
+            if (currentFrame > 1) {
+                cap.set(cv::CAP_PROP_POS_FRAMES, currentFrame - 2);
+                readSuccess = cap.read(frame);
+                if (readSuccess) {
+                    currentFrame--;
+                    printf("Moved back to frame %d\n", currentFrame);
+                }
+                else {
+                    cap.set(cv::CAP_PROP_POS_FRAMES, currentFrame - 1);
+                }
+            }
+            else {
+                printf("The first frame\n");
+            }
+        }
+        else if (!isPaused) {
+            readSuccess = cap.read(frame);
+            if (readSuccess) {
+                currentFrame++;
+            }
+            else {
+                break;
+            }
+        }
+    }
+
+    cap.release();
+    cv::destroyWindow("Video Playback");
+    printf("Playback finished\n");
+
+    g_iSelectedVideo = -1;
 }
 
 
@@ -171,9 +433,48 @@ static  unsigned int __stdcall WorkThread(void* pUser)
     cv::resizeWindow("Camera Display", 1280, 720);
 
     bool wasRecording = false;
+    bool wasPlay = false;
 
     while (1)
     {
+        if (g_bTogglePlay)
+        {
+            TogglePlayMode();
+            g_bTogglePlay = false;
+        }
+
+        if (g_bPlay && g_iSelectedVideo >= 0 && g_iSelectedVideo < g_videoFiles.size()) {
+            PlayVideo(g_videoFiles[g_iSelectedVideo]);
+            DisplayVideoFiles();
+
+            printf("Enter video number and press Enter: ");
+            g_bVideoSelectionMode = true;
+            g_videoSelectionBuffer.clear();
+        }
+
+        if (g_bPlay) {
+            if (!wasPlay) {
+                wasPlay = true;
+
+                cv::destroyWindow("Camera Display");
+            }
+            Sleep(100);
+            continue;
+        }
+        else if (wasPlay) {
+            wasPlay = false;
+
+            cv::namedWindow("Camera Display", cv::WINDOW_NORMAL);
+            cv::resizeWindow("Camera Display", 1280, 720);
+        }
+
+        if (g_bToggleDisplay)
+        {
+            g_bDisplay = !g_bDisplay;
+            printf("Display mode: %s\n", g_bDisplay ? "ON" : "OFF");
+            g_bToggleDisplay = false;
+        }
+
         if (g_bToggleRecording)
         {
             if (!g_bRecording)
@@ -228,7 +529,19 @@ static  unsigned int __stdcall WorkThread(void* pUser)
                 g_videoWriter.write(frame);
             }
 
-            cv::imshow("Camera Display", frame);
+            if (g_bDisplay)
+            {
+                cv::imshow("Camera Display", frame);
+            }
+            else
+            {
+                // OFF (Black screen)
+                cv::Mat blackScreen = cv::Mat::zeros(frame.rows, frame.cols, CV_8UC3);
+                cv::putText(blackScreen, "Display  OFF (Press 'D' to resume)",
+                    cv::Point(blackScreen.cols / 2 - 300, blackScreen.rows / 2),
+                    cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(255, 255, 255), 2);
+                cv::imshow("Camera Display", blackScreen);
+            }
 
             int key = cv::waitKey(1);
             if (key == 27)
@@ -253,6 +566,7 @@ static  unsigned int __stdcall WorkThread(void* pUser)
     free(pData);
     return 0;
 }
+
 
 int main()
 {
@@ -385,8 +699,11 @@ int main()
 
         printf("========= Camera Control Commands =========\n");
         printf("In terminal:\n");
+        printf("  'd' key: Display on/off\n");
         printf("  's' key: Start/Stop recording\n");
-        printf("  'q' key: Quit application\n");
+        printf("  'p' key: Enter/Exit playback mode\n");
+        printf("      (In playback mode, enter a number and press Enter to select video)\n");
+        printf("  'q' key: Quit\n");
         printf("==========================================\n");
 
         while (!g_bExit)
